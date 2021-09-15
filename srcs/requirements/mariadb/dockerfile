@@ -1,0 +1,11 @@
+FROM debian:buster
+
+RUN apt update -y
+RUN apt upgrade -y
+RUN apt install mariadb-server mariadb-client -y
+
+COPY ./conf conf
+COPY tools/script.sh /script.sh
+
+RUN chmod +x script.sh
+CMD ["sh", "script.sh"]
