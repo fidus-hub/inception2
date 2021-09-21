@@ -45,12 +45,12 @@ volumes:
   Wordpress:
     driver_opts:
       type: none
-      device: /home/mgrissen/data/Wordpress
+      device: /home/ada/data/Wordpress
       o: bind
   DB:
     driver_opts: 
       type: none
-      device: /home/mgrissen/data/DB
+      device: /home/ada/data/DB
       o: bind
 
 networks:
