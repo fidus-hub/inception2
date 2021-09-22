@@ -45,12 +45,12 @@ volumes:
   Wordpress:
     driver_opts:
       type: none
-      device: /home/ada/data/Wordpress
+      device: /Users/fidus/data/Wordpress
       o: bind
   DB:
     driver_opts: 
       type: none
-      device: /home/ada/data/DB
+      device: /Users/fidus/data/DB
       o: bind
 
 networks:

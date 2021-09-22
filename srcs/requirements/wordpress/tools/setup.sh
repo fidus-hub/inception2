@@ -10,7 +10,7 @@ sed -i 's/password_here/'$DBPASS'/g' /var/www/html/wp-config.php
 
 chmod -R 777 $DIR
 chown -R www-data /var/www/html
-mv .conf /etc/php/7.3/fpm/pool.d/www.conf
+mv conf /etc/php/7.3/fpm/pool.d/www.conf
 service php7.3-fpm start
 service php7.3-fpm stop
 echo "Starting php7.3-fpm in the foreground"

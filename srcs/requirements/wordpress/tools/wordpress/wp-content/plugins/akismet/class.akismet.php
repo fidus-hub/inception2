@@ -5,19 +5,12 @@ class Akismet {
 	const API_PORT = 80;
 	const MAX_DELAY_BEFORE_MODERATION_EMAIL = 86400; // One day in seconds
 
-	public static $LIMIT_NOTICES = array(
-		10501 => 'FIRST_MONTH_OVER_LIMIT',
-		10502 => 'SECOND_MONTH_OVER_LIMIT',
-		10504 => 'THIRD_MONTH_APPROACHING_LIMIT',
-		10508 => 'THIRD_MONTH_OVER_LIMIT',
-		10516 => 'FOUR_PLUS_MONTHS_OVER_LIMIT',
-	);
-
 	private static $last_comment = '';
 	private static $initiated = false;
 	private static $prevent_moderation_email_for_these_comments = array();
 	private static $last_comment_result = null;
 	private static $comment_as_submitted_allowed_keys = array( 'blog' => '', 'blog_charset' => '', 'blog_lang' => '', 'blog_ua' => '', 'comment_agent' => '', 'comment_author' => '', 'comment_author_IP' => '', 'comment_author_email' => '', 'comment_author_url' => '', 'comment_content' => '', 'comment_date_gmt' => '', 'comment_tags' => '', 'comment_type' => '', 'guid' => '', 'is_test' => '', 'permalink' => '', 'reporter' => '', 'site_domain' => '', 'submit_referer' => '', 'submit_uri' => '', 'user_ID' => '', 'user_agent' => '', 'user_id' => '', 'user_ip' => '' );
+	private static $is_rest_api_call = false;
 	
 	public static function init() {
 		if ( ! self::$initiated ) {
@@ -138,18 +131,12 @@ class Akismet {
 	}
 	
 	public static function rest_auto_check_comment( $commentdata ) {
-		return self::auto_check_comment( $commentdata, 'rest_api' );
+		self::$is_rest_api_call = true;
+		
+		return self::auto_check_comment( $commentdata );
 	}
 
-	/**
-	 * Check a comment for spam.
-	 *
-	 * @param array $commentdata
-	 * @param string $context What kind of request triggered this comment check? Possible values are 'default', 'rest_api', and 'xml-rpc'.
-	 * @return array|WP_Error Either the $commentdata array with additional entries related to its spam status
-	 *                        or a WP_Error, if it's a REST API request and the comment should be discarded.
-	 */
-	public static function auto_check_comment( $commentdata, $context = 'default' ) {
+	public static function auto_check_comment( $commentdata ) {
 		// If no key is configured, then there's no point in doing any of this.
 		if ( ! self::get_api_key() ) {
 			return $commentdata;
@@ -220,15 +207,7 @@ class Akismet {
 		do_action( 'akismet_comment_check_response', $response );
 
 		$commentdata['comment_as_submitted'] = array_intersect_key( $comment, self::$comment_as_submitted_allowed_keys );
-
-		// Also include any form fields we inject into the comment form, like ak_js
-		foreach ( $_POST as $key => $value ) {
-			if ( is_string( $value ) && strpos( $key, 'ak_' ) === 0 ) {
-				$commentdata['comment_as_submitted'][ 'POST_' . $key ] = $value;
-			}
-		}
-
-		$commentdata['akismet_result'] = $response[1];
+		$commentdata['akismet_result']       = $response[1];
 
 		if ( isset( $response[0]['x-akismet-pro-tip'] ) )
 	        $commentdata['akismet_pro_tip'] = $response[0]['x-akismet-pro-tip'];
@@ -253,19 +232,17 @@ class Akismet {
 					update_option( 'akismet_spam_count', get_option( 'akismet_spam_count' ) + $incr );
 				}
 
-				if ( 'rest_api' === $context ) {
+				if ( self::$is_rest_api_call ) {
 					return new WP_Error( 'akismet_rest_comment_discarded', __( 'Comment discarded.', 'akismet' ) );
-				} else if ( 'xml-rpc' === $context ) {
-					// If this is a pingback that we're pre-checking, the discard behavior is the same as the normal spam response behavior.
-					return $commentdata;
-				} else {
+				}
+				else {
 					// Redirect back to the previous page, or failing that, the post permalink, or failing that, the homepage of the blog.
 					$redirect_to = isset( $_SERVER['HTTP_REFERER'] ) ? $_SERVER['HTTP_REFERER'] : ( $post ? get_permalink( $post ) : home_url() );
 					wp_safe_redirect( esc_url_raw( $redirect_to ) );
 					die();
 				}
 			}
-			else if ( 'rest_api' === $context ) {
+			else if ( self::$is_rest_api_call ) {
 				// The way the REST API structures its calls, we can set the comment_approved value right away.
 				$commentdata['comment_approved'] = 'spam';
 			}
@@ -416,10 +393,6 @@ class Akismet {
 
 			clean_comment_cache( $comment_ids );
 			do_action( 'akismet_delete_comment_batch', count( $comment_ids ) );
-			
-			foreach ( $comment_ids as $comment_id ) {
-				do_action( 'deleted_comment', $comment_id );
-			}
 		}
 
 		if ( apply_filters( 'akismet_optimize_table', ( mt_rand(1, 5000) == 11), $wpdb->comments ) ) // lucky number
@@ -1266,31 +1239,21 @@ class Akismet {
 
 	// given a response from an API call like check_key_status(), update the alert code options if an alert is present.
 	public static function update_alert( $response ) {
-		$alert_option_prefix = 'akismet_alert_';
-		$alert_header_prefix = 'x-akismet-alert-';
-		$alert_header_names  = array(
-			'code',
-			'msg',
-			'api-calls',
-			'usage-limit',
-			'upgrade-plan',
-			'upgrade-url',
-		);
+		$code = $msg = null;
+		if ( isset( $response[0]['x-akismet-alert-code'] ) ) {
+			$code = $response[0]['x-akismet-alert-code'];
+			$msg  = $response[0]['x-akismet-alert-msg'];
+		}
 
-		foreach( $alert_header_names as $alert_header_name ) {
-			$value = null;
-			if ( isset( $response[0][$alert_header_prefix . $alert_header_name] ) ) {
-				$value = $response[0][$alert_header_prefix . $alert_header_name];
+		// only call update_option() if the value has changed
+		if ( $code != get_option( 'akismet_alert_code' ) ) {
+			if ( ! $code ) {
+				delete_option( 'akismet_alert_code' );
+				delete_option( 'akismet_alert_msg' );
 			}
-
-			$option_name = $alert_option_prefix . str_replace( '-', '_', $alert_header_name );
-			if ( $value != get_option( $option_name ) ) {
-				if ( ! $value ) {
-					delete_option( $option_name );
-				}
-				else {
-					update_option( $option_name, $value );
-				}
+			else {
+				update_option( 'akismet_alert_code', $code );
+				update_option( 'akismet_alert_msg', $msg );
 			}
 		}
 	}
@@ -1309,7 +1272,7 @@ class Akismet {
 	}
 	
 	/**
-	 * Mark form.js as deferred. Because nothing depends on it, it can run at any time
+	 * Mark form.js as async. Because nothing depends on it, it can run at any time
 	 * after it's loaded, and the browser won't have to wait for it to load to continue
 	 * parsing the rest of the page.
 	 */
@@ -1318,12 +1281,13 @@ class Akismet {
 			return $tag;
 		}
 		
-		return preg_replace( '/^<script /i', '<script defer ', $tag );
+		return preg_replace( '/^<script /i', '<script async="async" ', $tag );
 	}
 	
-	public static function inject_ak_js( $post_id ) {
+	public static function inject_ak_js( $fields ) {
+		echo '<p style="display: none;">';
 		echo '<input type="hidden" id="ak_js" name="ak_js" value="' . mt_rand( 0, 250 ) . '"/>';
-		echo '<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100" style="display: none !important;"></textarea>';
+		echo '</p>';
 	}
 
 	private static function bail_on_activation( $message, $deactivate = true ) {
@@ -1449,98 +1413,16 @@ p {
 		if ( $method !== 'pingback.ping' )
 			return;
 
-		// A lot of this code is tightly coupled with the IXR class because the xmlrpc_call action doesn't pass along any information besides the method name.
-		// This ticket should hopefully fix that: https://core.trac.wordpress.org/ticket/52524
-		// Until that happens, when it's a system.multicall, pre_check_pingback will be called once for every internal pingback call.
-		// Keep track of how many times this function has been called so we know which call to reference in the XML.
-		static $call_count = 0;
-
-		$call_count++;
-
 		global $wp_xmlrpc_server;
-
+	
 		if ( !is_object( $wp_xmlrpc_server ) )
 			return false;
-
-		$is_multicall = false;
-		$multicall_count = 0;
-
-		if ( 'system.multicall' === $wp_xmlrpc_server->message->methodName ) {
-			$is_multicall = true;
-
-			if ( 0 === $call_count ) {
-				// Only pass along the number of entries in the multicall the first time we see it.
-				$multicall_count = count( $wp_xmlrpc_server->message->params );
-			}
-
-			/*
-			 * $wp_xmlrpc_server->message looks like this:
-			 *
-				(
-					[message] =>
-					[messageType] => methodCall
-					[faultCode] =>
-					[faultString] =>
-					[methodName] => system.multicall
-					[params] => Array
-						(
-							[0] => Array
-								(
-									[methodName] => pingback.ping
-									[params] => Array
-										(
-											[0] => http://www.example.net/?p=1 // Site that created the pingback.
-											[1] => https://www.example.com/?p=1 // Post being pingback'd on this site.
-										)
-								)
-							[1] => Array
-								(
-									[methodName] => pingback.ping
-									[params] => Array
-										(
-											[0] => http://www.example.net/?p=1 // Site that created the pingback.
-											[1] => https://www.example.com/?p=2 // Post being pingback'd on this site.
-										)
-								)
-						)
-				)
-			 */
-
-			// Use the params from the nth pingback.ping call in the multicall.
-			$pingback_calls_found = 0;
-
-			foreach ( $wp_xmlrpc_server->message->params as $xmlrpc_action ) {
-				if ( 'pingback.ping' === $xmlrpc_action['methodName'] ) {
-					$pingback_calls_found++;
-				}
-
-				if ( $call_count === $pingback_calls_found ) {
-					$pingback_args = $xmlrpc_action['params'];
-					break;
-				}
-			}
-		} else {
-			/*
-			 * $wp_xmlrpc_server->message looks like this:
-			 *
-				(
-					[message] =>
-					[messageType] => methodCall
-					[faultCode] =>
-					[faultString] =>
-					[methodName] => pingback.ping
-					[params] => Array
-						(
-							[0] => http://www.example.net/?p=1 // Site that created the pingback.
-							[1] => https://www.example.com/?p=2 // Post being pingback'd on this site.
-						)
-				)
-			 */
-			$pingback_args = $wp_xmlrpc_server->message->params;
-		}
-
-		if ( ! empty( $pingback_args[1] ) ) {
-			$post_id = url_to_postid( $pingback_args[1] );
+	
+		// Lame: tightly coupled with the IXR class.
+		$args = $wp_xmlrpc_server->message->params;
+	
+		if ( !empty( $args[1] ) ) {
+			$post_id = url_to_postid( $args[1] );
 
 			// If pingbacks aren't open on this post, we'll still check whether this request is part of a potential DDOS,
 			// but indicate to the server that pingbacks are indeed closed so we don't include this request in the user's stats,
@@ -1553,30 +1435,23 @@ p {
 				$pingbacks_closed = true;
 			}
 
-			// Note: If is_multicall is true and multicall_count=0, then we know this is at least the 2nd pingback we've processed in this multicall.
-
 			$comment = array(
-				'comment_author_url' => $pingback_args[0],
+				'comment_author_url' => $args[0],
 				'comment_post_ID' => $post_id,
 				'comment_author' => '',
 				'comment_author_email' => '',
 				'comment_content' => '',
 				'comment_type' => 'pingback',
 				'akismet_pre_check' => '1',
-				'comment_pingback_target' => $pingback_args[1],
+				'comment_pingback_target' => $args[1],
 				'pingbacks_closed' => $pingbacks_closed ? '1' : '0',
-				'is_multicall' => $is_multicall,
-				'multicall_count' => $multicall_count,
 			);
 
-			$comment = self::auto_check_comment( $comment, 'xml-rpc' );
+			$comment = Akismet::auto_check_comment( $comment );
 
 			if ( isset( $comment['akismet_result'] ) && 'true' == $comment['akismet_result'] ) {
-				// Sad: tightly coupled with the IXR classes. Unfortunately the action provides no context and no way to return anything.
+				// Lame: tightly coupled with the IXR classes. Unfortunately the action provides no context and no way to return anything.
 				$wp_xmlrpc_server->error( new IXR_Error( 0, 'Invalid discovery target' ) );
-
-				// Also note that if this was part of a multicall, a spam result will prevent the subsequent calls from being executed.
-				// This is probably fine, but it raises the bar for what should be acceptable as a false positive.
 			}
 		}
 	}
@@ -1595,17 +1470,8 @@ p {
 		$meta_value = (array) $meta_value;
 
 		foreach ( $meta_value as $key => $value ) {
-			if ( ! is_scalar( $value ) ) {
-				unset( $meta_value[ $key ] );
-			} else {
-				// These can change, so they're not explicitly listed in comment_as_submitted_allowed_keys.
-				if ( strpos( $key, 'POST_ak_' ) === 0 ) {
-					continue;
-				}
-
-				if ( ! isset( self::$comment_as_submitted_allowed_keys[ $key ] ) ) {
-					unset( $meta_value[ $key ] );
-				}
+			if ( ! isset( self::$comment_as_submitted_allowed_keys[$key] ) || ! is_scalar( $value ) ) {
+				unset( $meta_value[$key] );
 			}
 		}
 
